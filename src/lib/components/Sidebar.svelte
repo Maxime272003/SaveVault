@@ -5,12 +5,13 @@
   import { app, type View } from "$lib/store.svelte";
   import Icon from "./Icon.svelte";
 
-  const sources: Store[] = ["steam", "epic", "ubisoft", "gog", "other"];
+  const sources: Store[] = ["steam", "epic", "ubisoft", "gog", "emulator", "other"];
 
   const nav: { view: View; label: Key }[] = [
     { view: "library", label: "nav.library" },
     { view: "unidentified", label: "nav.unidentified" },
     { view: "backups", label: "nav.backups" },
+    { view: "disk", label: "nav.disk" },
     { view: "settings", label: "nav.settings" },
   ];
 
@@ -18,6 +19,7 @@
     library: app.scan ? app.games.length : null,
     unidentified: app.scan ? app.scan.unidentified.length : null,
     backups: app.backups.length,
+    disk: null,
     settings: null,
   });
 </script>
@@ -68,6 +70,25 @@
         </select>
       </div>
     {/if}
+  {/if}
+
+  {#if app.progress}
+    {@const p = app.progress}
+    {@const pct = p.total ? Math.round((p.done / p.total) * 100) : null}
+    <div class="progress" role="status" aria-live="polite">
+      <span class="small label">{t(`progress.${p.task}`, { label: p.label })}</span>
+      <div
+        class="track"
+        role="progressbar"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={pct ?? undefined}
+        aria-label={t(`progress.${p.task}`, { label: p.label })}
+      >
+        <div class="fill" class:indeterminate={pct == null} style:width={pct == null ? "35%" : `${pct}%`}></div>
+      </div>
+      {#if pct != null}<span class="muted small">{pct} %</span>{/if}
+    </div>
   {/if}
 
   <div class="summary">
@@ -172,6 +193,54 @@
     accent-color: var(--accent);
     width: 15px;
     height: 15px;
+  }
+
+  .progress {
+    margin-top: auto;
+    padding: 12px;
+    border-radius: var(--radius);
+    background: #171b22;
+    border: 1px solid var(--accent-border);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .track {
+    height: 6px;
+    background: #262b35;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.2s;
+  }
+
+  .fill.indeterminate {
+    animation: slide 1.2s ease-in-out infinite;
+  }
+
+  @keyframes slide {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(300%);
+    }
+  }
+
+  .progress + .summary {
+    margin-top: 0;
   }
 
   .summary {

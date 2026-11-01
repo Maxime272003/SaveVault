@@ -1,23 +1,24 @@
 <script lang="ts">
-  import { api, type BackupInfo } from "$lib/api";
+  import { api, type BackupInfo, type FileList, type Location } from "$lib/api";
   import { formatDate, formatSize, relativeTime } from "$lib/format";
   import { t } from "$lib/i18n.svelte";
   import { app } from "$lib/store.svelte";
   import Cover from "./Cover.svelte";
-  import Dialog from "./Dialog.svelte";
   import Icon from "./Icon.svelte";
 
   const game = $derived(app.selected);
   const backups = $derived(game ? app.backupsFor(game.title) : []);
+  /** Dossiers non identifiés dont le nom correspond à ce jeu : à fusionner avec lui. */
+  const linkable = $derived(game ? (app.scan?.unidentified ?? []).filter((u) => u.suggestion === game.title) : []);
 
   let running = $state<boolean | null>(null);
   let busy = $state(false);
-  let dialog = $state<"delete" | "restore" | null>(null);
-  let restoreChoice = $state<string | null>(null);
+  let openFiles = $state<Record<string, FileList | "loading">>({});
 
   $effect(() => {
     const id = game?.id;
     running = null;
+    openFiles = {};
     if (!id) return;
     let cancelled = false;
     api.isGameRunning(id).then((r) => {
@@ -28,70 +29,39 @@
     };
   });
 
-  function needBackupDir(): boolean {
-    if (app.config?.backupDir) return false;
-    app.view = "settings";
-    app.toast(t("err.no_backup_dir"), "error");
-    return true;
-  }
-
   async function backup() {
-    if (!game || needBackupDir()) return;
-    busy = true;
-    try {
-      const info = await api.createBackup(game.id);
-      app.toast(t("backup.created", { name: info.fileName }));
-      await app.refreshBackups();
-    } catch (e) {
-      app.fail(e);
-    } finally {
-      busy = false;
-    }
-  }
-
-  function openRestore() {
-    if (needBackupDir()) return;
-    restoreChoice = backups[0]?.path ?? null;
-    dialog = "restore";
-  }
-
-  async function restore() {
-    if (!restoreChoice) return;
-    try {
-      await api.restoreBackup(restoreChoice);
-      app.toast(t("backup.restored"));
-      await app.refreshBackups();
-      await app.rescan();
-    } catch (e) {
-      app.fail(e);
-    }
-  }
-
-  async function restoreOne(b: BackupInfo) {
-    if (needBackupDir()) return;
-    restoreChoice = b.path;
-    dialog = "restore";
-  }
-
-  async function remove() {
     if (!game) return;
-    const title = game.title;
+    busy = true;
+    await app.backupGame(game.id);
+    busy = false;
+  }
+
+  async function toggleFiles(loc: Location) {
+    if (openFiles[loc.path]) {
+      const { [loc.path]: _, ...rest } = openFiles;
+      openFiles = rest;
+      return;
+    }
+    openFiles = { ...openFiles, [loc.path]: "loading" };
     try {
-      await api.deleteGameSaves(game.id);
-      app.toast(t("confirm.done", { game: title }));
-      await app.refreshBackups();
-      app.scan = await api.getCachedScan();
-      app.selectedId = app.filtered[0]?.id ?? null;
+      const list = await api.listLocationFiles(loc.path, loc.kind === "files" ? loc.files : []);
+      openFiles = { ...openFiles, [loc.path]: list };
     } catch (e) {
       app.fail(e);
     }
+  }
+
+  function openRestore(b?: BackupInfo) {
+    if (!game || !app.requireBackupDir()) return;
+    app.dialog = { kind: "restore", gameId: game.id, backupPath: b?.path };
   }
 
   function openDelete() {
-    if (needBackupDir()) return;
-    dialog = "delete";
+    if (!game || !app.requireBackupDir()) return;
+    app.dialog = { kind: "delete", gameId: game.id };
   }
 
+  const firstFolder = $derived(game?.locations.find((l) => l.kind !== "registry")?.path ?? null);
   const kindLabel = (b: BackupInfo) => (b.kind === "manual" ? "" : ` · ${t(`backup.kind.${b.kind}`)}`);
 </script>
 
@@ -122,33 +92,81 @@
           {game.locations.length > 1 ? t("game.locations", { n: game.locations.length }) : t("game.location")}
         </span>
         {#each game.locations as loc (loc.path)}
+          {@const files = openFiles[loc.path]}
           <div class="loc">
             <div class="loc-head">
               <code class="mono">{loc.path}</code>
-              <button class="icon-btn" aria-label={t("game.openLocation")} title={t("game.openLocation")} onclick={() => api.openPath(loc.path).catch((e) => app.fail(e))}>
-                <Icon name="folder" />
-              </button>
+              {#if loc.kind !== "registry"}
+                <button
+                  class="icon-btn"
+                  aria-label={t("game.openLocation")}
+                  title={t("game.openLocation")}
+                  onclick={() => api.openPath(loc.path).catch((e) => app.fail(e))}
+                >
+                  <Icon name="folder" />
+                </button>
+              {/if}
             </div>
             <div class="loc-meta">
-              <span>
-                {formatSize(loc.size)} · {t("game.files", { n: loc.fileCount })}
-                {#if loc.custom}· {t("game.custom")}{/if}
-              </span>
-              <span>{t("game.modified", { when: relativeTime(loc.modified) })}</span>
+              {#if loc.kind === "registry"}
+                <span>{t("game.registry")} · {t("game.entries", { n: loc.fileCount })}</span>
+              {:else}
+                <span>
+                  {formatSize(loc.size)} · {t("game.files", { n: loc.fileCount })}
+                  {#if loc.custom}· {t("game.custom")}{/if}
+                </span>
+                <span>{t("game.modified", { when: relativeTime(loc.modified) })}</span>
+              {/if}
             </div>
+            {#if loc.kind !== "registry"}
+              <button class="link" onclick={() => toggleFiles(loc)} aria-expanded={!!files}>
+                {files ? t("game.hideFiles") : t("game.showFiles")}
+              </button>
+              {#if files === "loading"}
+                <span class="muted small">…</span>
+              {:else if files}
+                <ul class="files">
+                  {#each files.files as f (f.path)}
+                    <li>
+                      <span class="fname" title={f.path}>{f.path}</span>
+                      <span class="muted">{formatSize(f.size)}</span>
+                      <span class="muted">{relativeTime(f.modified)}</span>
+                    </li>
+                  {/each}
+                </ul>
+                {#if files.truncated}<span class="muted small">{t("game.filesTruncated")}</span>{/if}
+              {/if}
+            {/if}
           </div>
         {/each}
       </section>
+
+      {#if linkable.length}
+        <section class="linkable">
+          <span class="caps">{t("game.linkable", { n: linkable.length })}</span>
+          <span class="muted small">{t("game.linkableHint")}</span>
+          {#each linkable as u (u.path)}
+            <div class="link-row">
+              <code class="mono">{u.path}</code>
+              <span class="muted small">{formatSize(u.size)}</span>
+            </div>
+          {/each}
+          <button class="btn small primary" onclick={() => app.attach(linkable.map((u) => ({ game: game.title, path: u.path })))}>
+            <Icon name="link" size={14} />
+            {t("game.attachAll")}
+          </button>
+        </section>
+      {/if}
 
       <div class="actions">
         <button class="btn tall primary wide" onclick={backup} disabled={busy}>
           <Icon name="download" />
           {t("game.backup")}
         </button>
-        <button class="btn tall" onclick={() => api.openPath(game.locations[0].path).catch((e) => app.fail(e))}>
+        <button class="btn tall" onclick={() => firstFolder && api.openPath(firstFolder).catch((e) => app.fail(e))} disabled={!firstFolder}>
           {t("game.open")}
         </button>
-        <button class="btn tall" onclick={openRestore} disabled={backups.length === 0 || running === true}>
+        <button class="btn tall" onclick={() => openRestore()} disabled={backups.length === 0 || running === true}>
           {t("game.restore")}
         </button>
         <button class="btn tall danger wide" onclick={openDelete} disabled={running === true}>
@@ -171,7 +189,7 @@
               <span>{formatDate(b.createdAt)}</span>
               <span class="muted small">{formatSize(b.size)}{kindLabel(b)}</span>
             </div>
-            <button class="btn small restore" onclick={() => restoreOne(b)} disabled={running === true}>
+            <button class="btn small restore" onclick={() => openRestore(b)} disabled={running === true}>
               {t("backup.restore")}
             </button>
           </div>
@@ -182,58 +200,6 @@
     <p class="none">{t("library.noSelection")}</p>
   {/if}
 </aside>
-
-{#if dialog === "delete" && game}
-  <Dialog
-    title={t("confirm.deleteTitle", { game: game.title })}
-    icon="trash"
-    tone="danger"
-    confirmLabel={t("confirm.deleteAction")}
-    onconfirm={remove}
-    onclose={() => (dialog = null)}
-  >
-    {#each game.locations as loc (loc.path)}
-      <div class="loc">
-        <code class="mono">{loc.path}</code>
-        <span class="muted small">
-          {t("game.files", { n: loc.fileCount })} · {formatSize(loc.size)} · {t("game.modified", { when: relativeTime(loc.modified) })}
-        </span>
-      </div>
-    {/each}
-    <div class="check"><Icon name="check" color="var(--ok)" /><span>{t("confirm.deleteBackupFirst", { dir: app.config?.backupDir ?? "" })}</span></div>
-    <div class="check"><Icon name="check" color="var(--ok)" /><span>{t("confirm.deleteTrash")}</span></div>
-    {#if game.cloudSteam}
-      <div class="callout info">{t("game.cloudWarning")}</div>
-    {/if}
-  </Dialog>
-{/if}
-
-{#if dialog === "restore" && game}
-  <Dialog
-    title={t("confirm.restoreTitle", { game: game.title })}
-    icon="download"
-    tone="accent"
-    confirmLabel={t("confirm.restoreAction")}
-    confirmDisabled={!restoreChoice}
-    onconfirm={restore}
-    onclose={() => (dialog = null)}
-  >
-    <span>{t("confirm.chooseBackup")}</span>
-    <div class="choices">
-      {#each backups as b (b.path)}
-        <label class="choice">
-          <input type="radio" name="backup" value={b.path} bind:group={restoreChoice} />
-          <span>{formatDate(b.createdAt)}</span>
-          <span class="muted small">{formatSize(b.size)}{kindLabel(b)}</span>
-        </label>
-      {/each}
-    </div>
-    <div class="check"><Icon name="check" color="var(--ok)" /><span>{t("confirm.restoreInfo")}</span></div>
-    {#if game.cloudSteam}
-      <div class="callout info">{t("game.cloudWarning")}</div>
-    {/if}
-  </Dialog>
-{/if}
 
 <style>
   aside {
@@ -327,6 +293,59 @@
     font-size: 12px;
   }
 
+  .link {
+    align-self: flex-start;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .files {
+    list-style: none;
+    margin: 0;
+    padding: 6px 0 0;
+    border-top: 1px solid var(--divider);
+    max-height: 220px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 12px;
+  }
+
+  .files li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+  }
+
+  .fname {
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .linkable {
+    background: #1c1a14;
+    border: 1px solid var(--accent-border);
+    border-radius: var(--radius);
+    padding: 12px;
+  }
+
+  .link-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .linkable .btn {
+    align-self: flex-start;
+  }
+
   .actions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -366,31 +385,5 @@
     color: var(--muted);
     padding: 24px;
     text-align: center;
-  }
-
-  .check {
-    display: flex;
-    gap: 10px;
-    align-items: flex-start;
-  }
-
-  .choices {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .choice {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    gap: 10px;
-    align-items: center;
-    padding: 8px 10px;
-    border-radius: 6px;
-    background: var(--surface);
-  }
-
-  .choice input {
-    accent-color: var(--accent);
   }
 </style>

@@ -1,10 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type Store = "steam" | "epic" | "ubisoft" | "gog" | "other";
+export type Store = "steam" | "epic" | "ubisoft" | "gog" | "emulator" | "other";
 
 export interface Location {
   path: string;
-  kind: "dir" | "files";
+  kind: "dir" | "files" | "registry";
   files: string[];
   size: number;
   fileCount: number;
@@ -45,7 +45,7 @@ export interface ScanResult {
   accounts: string[];
 }
 
-export type BackupKind = "manual" | "pre-restore" | "pre-delete";
+export type BackupKind = "manual" | "auto" | "pre-restore" | "pre-delete";
 
 export interface BackupInfo {
   path: string;
@@ -71,6 +71,27 @@ export interface AppConfig {
   customEntries: CustomEntry[];
   ignoredPaths: string[];
   gameDirs: string[];
+  autoBackup: "off" | "startup" | "daily" | "weekly";
+  lastAutoBackup: number | null;
+}
+
+export interface BatchReport {
+  created: number;
+  skipped: number;
+  failed: { game: string; error: string }[];
+}
+
+export interface FileList {
+  files: { path: string; size: number; modified: number | null }[];
+  truncated: boolean;
+}
+
+export interface ProgressEvent {
+  task: "manifest" | "backup" | "batch" | "restore";
+  label: string;
+  done: number;
+  total: number;
+  finished: boolean;
 }
 
 export interface ManifestStatus {
@@ -103,6 +124,11 @@ export const api = {
   getCachedScan: () => invoke<ScanResult | null>("get_cached_scan"),
   runScan: () => invoke<ScanResult>("run_scan"),
   createBackup: (gameId: string) => invoke<BackupInfo>("create_backup", { gameId }),
+  backupGames: (gameIds: string[], onlyChanged: boolean, auto = false) =>
+    invoke<BatchReport>("backup_games", { gameIds, onlyChanged, auto }),
+  listLocationFiles: (path: string, files: string[]) => invoke<FileList>("list_location_files", { path, files }),
+  isSteamRunning: () => invoke<boolean>("is_steam_running"),
+  openLogDir: () => invoke<void>("open_log_dir"),
   backupUnknown: (path: string) => invoke<BackupInfo>("backup_unknown", { path }),
   deleteUnknown: (path: string) => invoke<void>("delete_unknown", { path }),
   listBackups: () => invoke<BackupInfo[]>("list_backups"),

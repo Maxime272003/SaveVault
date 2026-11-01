@@ -5,10 +5,15 @@ Application Windows qui répertorie les sauvegardes de tes jeux vidéo, te perme
 ## Fonctionnalités
 
 - **Détection** des saves de plus de 50 000 jeux grâce au [manifeste Ludusavi](https://github.com/mtkennerly/ludusavi-manifest), plus les dossiers `Steam\userdata` et des chemins personnalisés.
-- **Launchers** : Steam (toutes les bibliothèques, tous les comptes), Epic Games, Ubisoft Connect, GOG.
+- **Launchers** : Steam (toutes les bibliothèques, tous les comptes), Epic Games, Ubisoft Connect, GOG, et des dossiers de jeux libres (`C:\Games` par défaut).
+- **Registre Windows** : les saves stockées dans `HKEY_CURRENT_USER` sont détectées, sauvegardées (`.reg`) et restaurées.
+- **Émulateurs** : Ryujinx, yuzu et dérivés, Dolphin, Cemu, Citra/Lime3DS/Azahar, PCSX2, DuckStation, RPCS3, PPSSPP, Vita3K, RetroArch.
 - **Jeux désinstallés** : leurs saves restantes sont listées aussi, pour faire le ménage.
 - **Dossiers non identifiés** : les dossiers qui ressemblent à des saves sont proposés, avec une suggestion de jeu, à rattacher ou ignorer.
-- **Backups zip** horodatés (avec un `savevault.json` qui décrit les chemins d'origine), **restauration** en un clic, rétention optionnelle des N derniers par jeu.
+- **Backups zip** horodatés (avec un `savevault.json` qui décrit les chemins d'origine), **vérifiés après création**, **restauration** en un clic, rétention optionnelle des N derniers par jeu.
+- **Backup en lot** (tous les jeux, ou une sélection) et **backups automatiques** (à l'ouverture, chaque jour ou chaque semaine) des jeux modifiés.
+- **Espace disque** : saves les plus lourdes, nettoyage des jeux désinstallés, poids des backups.
+- **Confort** : menu clic droit, raccourcis clavier, sélection multiple, liste des fichiers d'un emplacement, barre de progression, journal des erreurs.
 - **Sécurité** : backup automatique avant chaque suppression ou restauration, envoi à la corbeille, blocage si le jeu tourne, avertissement Steam Cloud.
 - **Jaquettes** depuis le cache de Steam ou son CDN, sinon [SteamGridDB](https://www.steamgriddb.com/) (clé API optionnelle), mises en cache sur le disque.
 - **Mises à jour intégrées** : vérification au démarrage et dans les paramètres.

@@ -6,11 +6,24 @@
   import { api, type CacheStats, type TitleHit } from "$lib/api";
   import { resetCoverCache } from "$lib/covers";
   import { formatSize, relativeTime } from "$lib/format";
-  import { errorText, t } from "$lib/i18n.svelte";
+  import { errorText, i18n, t, type Key } from "$lib/i18n.svelte";
   import { app } from "$lib/store.svelte";
   import Dialog from "./Dialog.svelte";
 
   const REPO = "https://github.com/Maxime272003/SaveVault";
+
+  const shortcuts = $derived.by((): [string[], Key][] => {
+    const fr = i18n.lang === "fr";
+    return [
+      [["← ↑ → ↓"], "keys.navigate"],
+      [["Ctrl+F"], "keys.search"],
+      [["Ctrl+B"], "keys.backup"],
+      [[t("keys.deleteKey")], "keys.delete"],
+      [["F5"], "keys.rescan"],
+      [[fr ? "Ctrl+clic" : "Ctrl+click", fr ? "Maj+clic" : "Shift+click", "Ctrl+A"], "keys.multi"],
+      [[fr ? "Clic droit" : "Right-click"], "keys.menu"],
+    ];
+  });
 
   let version = $state("");
   let progress = $state<number | null>(null);
@@ -205,6 +218,27 @@
         />
         <span>{t("settings.retentionAfter")}</span>
       </div>
+      <div class="row">
+        <label for="auto">{t("settings.autoBackup")}</label>
+        <select
+          id="auto"
+          class="input"
+          value={app.config?.autoBackup ?? "off"}
+          onchange={async (e) => {
+            await app.saveConfig({ autoBackup: e.currentTarget.value as "off" | "startup" | "daily" | "weekly" }, true);
+            await app.autoBackupIfDue(false);
+          }}
+        >
+          <option value="off">{t("settings.auto.off")}</option>
+          <option value="startup">{t("settings.auto.startup")}</option>
+          <option value="daily">{t("settings.auto.daily")}</option>
+          <option value="weekly">{t("settings.auto.weekly")}</option>
+        </select>
+      </div>
+      <span class="muted small">
+        {t("settings.autoBackupHint")}
+        {#if app.config?.lastAutoBackup}<br />{t("settings.lastAuto", { when: relativeTime(app.config.lastAutoBackup) })}{/if}
+      </span>
       <div class="row foot">
         <span class="muted">{t("settings.backupStats", { n: app.backups.length })}</span>
         <strong>{t("settings.used", { size: formatSize(backupTotal) })}</strong>
@@ -298,6 +332,24 @@
       </span>
       <div>
         <button class="btn" onclick={updateManifest} disabled={updatingManifest || app.scanning}>{t("settings.updateManifest")}</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>{t("settings.shortcuts")}</h2>
+      <dl class="keys">
+        {#each shortcuts as [keys, label] (label)}
+          <dt>{#each keys as k, i (k)}{#if i}<span class="plus">·</span>{/if}<kbd>{k}</kbd>{/each}</dt>
+          <dd>{t(label)}</dd>
+        {/each}
+      </dl>
+    </section>
+
+    <section>
+      <h2>{t("settings.logs")}</h2>
+      <span class="muted small">{t("settings.logsHint")}</span>
+      <div>
+        <button class="btn" onclick={() => api.openLogDir().catch((e) => app.fail(e))}>{t("settings.openLogs")}</button>
       </div>
     </section>
   </div>
@@ -501,6 +553,40 @@
     flex-direction: column;
     gap: 2px;
     min-width: 0;
+  }
+
+  .keys {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 8px 16px;
+    margin: 0;
+    align-items: center;
+  }
+
+  .keys dt {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .keys dd {
+    margin: 0;
+    color: var(--text-soft);
+  }
+
+  kbd {
+    font-family: var(--font-body);
+    font-size: 12px;
+    border: 1px solid var(--border-strong);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 1px 6px;
+    background: var(--surface);
+  }
+
+  .plus {
+    color: var(--muted);
   }
 
   .hits {

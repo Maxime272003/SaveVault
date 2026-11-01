@@ -38,6 +38,10 @@ CDN Steam (via l'AppID, y compris celui du manifeste pour un jeu hors Steam) →
 - Installeur NSIS par utilisateur (sans admin). Pas de signature de code Windows : avertissement SmartScreen accepté.
 - Updater Tauri : vérification discrète au démarrage (pastille sur Paramètres) et bouton « Rechercher une mise à jour » ; installation et redémarrage au clic.
 
-## Hors périmètre v1
+## Ajouts après la v0.1.0
 
-Backups automatiques planifiés, émulateurs, saves dans le registre, synchronisation cloud.
+Actions en lot sur les dossiers non identifiés, backup de tous les jeux ou d'une sélection, vérification CRC de chaque zip, miniatures des jaquettes, barre de progression, backups automatiques (ouverture / quotidien / hebdomadaire, jeux modifiés seulement, tant que l'app est ouverte), liste des fichiers, menu clic droit et raccourcis, fusion des dossiers correspondant à un jeu, vue « Espace disque », alerte « Steam ouvert » avant restauration d'un jeu Steam Cloud, journal (`%LOCALAPPDATA%\com.maxime272003.savevault\logs`), saves dans le registre HKCU, émulateurs.
+
+## Hors périmètre
+
+Signature du `.exe` (certificat payant), synchronisation cloud, tâche planifiée Windows quand l'app est fermée.

@@ -1,5 +1,7 @@
 <script lang="ts">
   import Backups from "$lib/components/Backups.svelte";
+  import Dialogs from "$lib/components/Dialogs.svelte";
+  import DiskSpace from "$lib/components/DiskSpace.svelte";
   import FirstRun from "$lib/components/FirstRun.svelte";
   import Library from "$lib/components/Library.svelte";
   import Settings from "$lib/components/Settings.svelte";
@@ -27,6 +29,8 @@
     <Unidentified />
   {:else if app.view === "backups"}
     <Backups />
+  {:else if app.view === "disk"}
+    <DiskSpace />
   {:else}
     <Settings />
   {/if}
@@ -36,6 +40,7 @@
   <FirstRun onclose={() => (firstRunDismissed = true)} />
 {/if}
 
+<Dialogs />
 <Toasts />
 
 <style>
