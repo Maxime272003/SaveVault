@@ -21,6 +21,7 @@ pub struct CacheStats {
     pub bytes: u64,
 }
 
+
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -192,11 +193,43 @@ async fn steamgriddb(key: &str, title: &str) -> Option<String> {
     grids.data.into_iter().next().map(|g| g.url)
 }
 
+/// Largeur des miniatures : assez pour la grille et le bandeau du panneau de détails.
+const THUMB_WIDTH: u32 = 400;
+
+/// Miniature JPEG de la jaquette (créée une fois), ou l'original si elle ne peut pas être générée.
+/// Une image SteamGridDB fait ~750 Ko ; sa miniature ~40 Ko.
+pub fn thumbnail(original: &Path) -> PathBuf {
+    let Some(stem) = original.file_stem() else { return original.to_path_buf() };
+    let thumb = original.with_file_name(format!("thumb_{}.jpg", stem.to_string_lossy()));
+    if thumb.exists() {
+        return thumb;
+    }
+    let made = (|| -> Option<()> {
+        let img = image::open(original).ok()?;
+        let img = if img.width() > THUMB_WIDTH {
+            img.resize(THUMB_WIDTH, u32::MAX, image::imageops::FilterType::Triangle)
+        } else {
+            img
+        };
+        let mut out = std::io::BufWriter::new(fs::File::create(&thumb).ok()?);
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
+            .encode_image(&img.to_rgb8())
+            .ok()
+    })();
+    if made.is_some() {
+        thumb
+    } else {
+        let _ = fs::remove_file(&thumb);
+        original.to_path_buf()
+    }
+}
+
 pub fn stats(cache: &Path) -> CacheStats {
     let mut s = CacheStats { count: 0, bytes: 0 };
     if let Ok(entries) = fs::read_dir(cache) {
         for e in entries.flatten() {
-            if e.path().extension().is_some_and(|x| x == "none") {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.ends_with(".none") || name.starts_with("thumb_") {
                 continue;
             }
             if let Ok(m) = e.metadata() {
