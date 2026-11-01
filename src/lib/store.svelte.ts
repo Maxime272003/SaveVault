@@ -13,9 +13,10 @@ export interface Toast {
 
 class AppStore {
   config = $state<AppConfig | null>(null);
-  scan = $state<ScanResult | null>(null);
+  // Remplacés d'un bloc, jamais modifiés en place : pas besoin de réactivité profonde.
+  scan = $state.raw<ScanResult | null>(null);
   scanning = $state(false);
-  backups = $state<BackupInfo[]>([]);
+  backups = $state.raw<BackupInfo[]>([]);
   manifest = $state<ManifestStatus | null>(null);
   view = $state<View>("library");
   selectedId = $state<string | null>(null);
@@ -33,15 +34,12 @@ class AppStore {
 
   #toastId = 0;
 
-  get games(): Game[] {
-    return this.scan?.games ?? [];
-  }
+  games = $derived<Game[]>(this.scan?.games ?? []);
+  selected = $derived<Game | null>(this.games.find((g) => g.id === this.selectedId) ?? null);
+  totalSize = $derived(this.games.reduce((sum, g) => sum + g.size, 0));
+  filtered = $derived.by(() => this.#filter());
 
-  get selected(): Game | null {
-    return this.games.find((g) => g.id === this.selectedId) ?? null;
-  }
-
-  get filtered(): Game[] {
+  #filter(): Game[] {
     const q = this.search.trim().toLowerCase();
     const list = this.games.filter(
       (g) =>
@@ -56,10 +54,6 @@ class AppStore {
       size: (a, b) => b.size - a.size,
     };
     return list.sort(by[this.sort]);
-  }
-
-  get totalSize(): number {
-    return this.games.reduce((sum, g) => sum + g.size, 0);
   }
 
   backupsFor(title: string): BackupInfo[] {

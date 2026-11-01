@@ -39,7 +39,7 @@
   async function ignore(u: UnknownDir) {
     if (!app.config) return;
     await app.saveConfig({ ignoredPaths: [...app.config.ignoredPaths, u.path] });
-    if (app.scan) app.scan.unidentified = app.scan.unidentified.filter((x) => x.path !== u.path);
+    if (app.scan) app.scan = { ...app.scan, unidentified: app.scan.unidentified.filter((x) => x.path !== u.path) };
     app.toast(t("unknown.ignored"));
   }
 
@@ -61,7 +61,7 @@
   async function remove(u: UnknownDir) {
     try {
       await api.deleteUnknown(u.path);
-      if (app.scan) app.scan.unidentified = app.scan.unidentified.filter((x) => x.path !== u.path);
+      if (app.scan) app.scan = { ...app.scan, unidentified: app.scan.unidentified.filter((x) => x.path !== u.path) };
       await app.refreshBackups();
     } catch (e) {
       app.fail(e);

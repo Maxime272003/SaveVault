@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,11 +85,15 @@ struct Ctx<'a> {
     protected: Vec<String>,
     installs: Vec<String>,
     user_name: String,
+    dir_cache: DirCache,
+    /// AppID → dossiers `Steam\userdata\<compte>\<appid>\remote`, listés une seule fois.
+    steam_remote: HashMap<u32, Vec<PathBuf>>,
 }
 
 pub fn run(manifest: &Manifest, config: &AppConfig) -> ScanResult {
     let dirs = KnownDirs::detect();
-    let stores = Stores::detect(dirs.program_data.as_deref());
+    let game_dirs: Vec<PathBuf> = config.game_dirs.iter().map(PathBuf::from).collect();
+    let stores = Stores::detect(dirs.program_data.as_deref(), &game_dirs);
     let mut protected: Vec<String> = dirs.protected().iter().map(|p| paths::norm(p)).collect();
     if let Some(root) = &stores.steam.root {
         protected.push(paths::norm(root));
@@ -103,6 +108,8 @@ pub fn run(manifest: &Manifest, config: &AppConfig) -> ScanResult {
         dirs: &dirs,
         stores: &stores,
         protected,
+        dir_cache: DirCache::default(),
+        steam_remote: steam_remote_dirs(&stores),
     };
 
     let index = InstallIndex::new(&stores.installed);
@@ -196,12 +203,11 @@ fn scan_manifest_game(ctx: &Ctx, index: &InstallIndex, g: &MGame) -> Option<Game
     let mut matched: Vec<PathBuf> = Vec::new();
     for f in &g.files {
         for pattern in expand(ctx, f, g, inst) {
-            matched.extend(glob_existing(&pattern));
+            matched.extend(glob_existing(&ctx.dir_cache, &pattern));
         }
     }
-    if let (Some(root), Some(id)) = (&ctx.stores.steam.root, g.steam_id) {
-        let pattern = format!("{}\\userdata\\*\\{}\\remote", glob::Pattern::escape(&root.to_string_lossy()), id);
-        matched.extend(glob_existing(&pattern));
+    if let Some(dirs) = g.steam_id.and_then(|id| ctx.steam_remote.get(&id)) {
+        matched.extend(dirs.iter().cloned());
     }
     if matched.is_empty() {
         return None;
@@ -211,6 +217,23 @@ fn scan_manifest_game(ctx: &Ctx, index: &InstallIndex, g: &MGame) -> Option<Game
         return None;
     }
     Some(make_game(ctx, g.name.clone(), g.steam_id, g.cloud_steam, inst, locations))
+}
+
+fn steam_remote_dirs(stores: &Stores) -> HashMap<u32, Vec<PathBuf>> {
+    let mut out: HashMap<u32, Vec<PathBuf>> = HashMap::new();
+    let Some(root) = &stores.steam.root else { return out };
+    for user in list_dirs(&root.join("userdata")) {
+        for app in list_dirs(&user) {
+            let Some(id) = app.file_name().and_then(|n| n.to_str()).and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            let remote = app.join("remote");
+            if remote.is_dir() {
+                out.entry(id).or_default().push(remote);
+            }
+        }
+    }
+    out
 }
 
 fn make_game(
@@ -361,16 +384,55 @@ fn expand(ctx: &Ctx, f: &MFile, g: &MGame, inst: Option<&InstalledGame>) -> Vec<
     vec![s]
 }
 
-fn glob_existing(pattern: &str) -> Vec<PathBuf> {
+/// Contenu des dossiers déjà lus, partagé entre threads : chaque dossier n'est listé qu'une fois
+/// au lieu d'un appel disque par chemin du manifeste (~150 000 chemins).
+#[derive(Default)]
+struct DirCache {
+    children: RwLock<HashMap<String, Option<Arc<HashSet<String>>>>>,
+}
+
+impl DirCache {
+    fn list(&self, dir: &str) -> Option<Arc<HashSet<String>>> {
+        if let Some(hit) = self.children.read().unwrap().get(dir) {
+            return hit.clone();
+        }
+        let listed = fs::read_dir(dir)
+            .ok()
+            .map(|it| Arc::new(it.flatten().map(|e| e.file_name().to_string_lossy().to_lowercase()).collect()));
+        self.children.write().unwrap().insert(dir.to_string(), listed.clone());
+        listed
+    }
+
+    /// Le chemin (absolu, séparateurs `\`, sans joker) existe-t-il ? Insensible à la casse, comme Windows.
+    fn exists(&self, path: &str) -> bool {
+        let lower = path.to_lowercase();
+        let mut parts = lower.split('\\').filter(|p| !p.is_empty() && *p != ".");
+        let Some(drive) = parts.next() else { return false };
+        let mut cur = format!("{drive}\\");
+        for part in parts {
+            match self.list(&cur) {
+                Some(set) if set.contains(part) => {
+                    if !cur.ends_with('\\') {
+                        cur.push('\\');
+                    }
+                    cur.push_str(part);
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+fn glob_existing(cache: &DirCache, pattern: &str) -> Vec<PathBuf> {
     let pat = pattern.replace('/', "\\");
     match pat.find(['*', '?', '[']) {
         None => {
-            let p = PathBuf::from(&pat);
-            if p.exists() { vec![p] } else { vec![] }
+            if cache.exists(&pat) { vec![PathBuf::from(pat)] } else { vec![] }
         }
         Some(i) => {
             let dir = pat[..i].rfind('\\').map(|j| &pat[..j]).unwrap_or("");
-            if dir.is_empty() || !Path::new(dir).exists() {
+            if dir.is_empty() || !cache.exists(dir) {
                 return vec![];
             }
             let opts = glob::MatchOptions {
