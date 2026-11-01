@@ -7,6 +7,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// À incrémenter quand le format réduit change : force la reconstruction du cache local.
+pub const FORMAT: u32 = 2;
+
 pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/mtkennerly/ludusavi-manifest/master/data/manifest.yaml";
 
@@ -28,6 +31,9 @@ pub struct MGame {
     pub cloud_steam: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<MFile>,
+    /// Clés de registre HKCU qui contiennent des saves (séparateurs `\`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub registry: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,12 +50,15 @@ pub struct ManifestMeta {
     pub etag: Option<String>,
     pub updated_at: Option<i64>,
     pub game_count: usize,
+    #[serde(default)]
+    pub format: u32,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawGame {
     files: BTreeMap<String, RawFile>,
+    registry: BTreeMap<String, RawFile>,
     #[serde(rename = "installDir")]
     install_dir: BTreeMap<String, serde_yaml::Value>,
     steam: Option<RawId>,
@@ -95,8 +104,16 @@ pub fn from_yaml(yaml: &str) -> Result<Manifest> {
                 .into_iter()
                 .filter_map(|(path, f)| windows_save_file(path, f))
                 .collect();
+            let registry = g
+                .registry
+                .into_iter()
+                .filter_map(|(key, f)| windows_save_file(key, f))
+                .map(|f| f.path.replace('/', "\\"))
+                .filter(|k| k.to_uppercase().starts_with("HKEY_CURRENT_USER\\") && !k.contains('<'))
+                .collect();
             MGame {
                 name,
+                registry,
                 steam_id: g.steam.and_then(|s| s.id).and_then(|id| u32::try_from(id).ok()),
                 gog_id: g.gog.and_then(|s| s.id),
                 install_dirs: g.install_dir.into_keys().collect(),
@@ -150,6 +167,9 @@ impl ManifestFiles {
     }
 
     pub fn load(&self) -> Option<Manifest> {
+        if self.load_meta().format < FORMAT {
+            return None;
+        }
         let bytes = fs::read(&self.data).ok()?;
         serde_json::from_slice(&bytes).ok()
     }
@@ -172,8 +192,13 @@ impl ManifestFiles {
 }
 
 /// Télécharge le manifeste si il a changé. Renvoie `None` si la copie locale est à jour.
-pub async fn download(files: &ManifestFiles, force: bool) -> Result<Option<(Manifest, ManifestMeta)>> {
+pub async fn download(
+    files: &ManifestFiles,
+    force: bool,
+    on_progress: &(dyn Fn(u64, u64) + Sync),
+) -> Result<Option<(Manifest, ManifestMeta)>> {
     let previous = files.load_meta();
+    let force = force || previous.format < FORMAT;
     let client = reqwest::Client::builder()
         .user_agent(concat!("SaveVault/", env!("CARGO_PKG_VERSION")))
         .build()?;
@@ -196,12 +221,24 @@ pub async fn download(files: &ManifestFiles, force: bool) -> Result<Option<(Mani
         .get(reqwest::header::ETAG)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let text = resp.text().await?;
+    let total = resp.content_length().unwrap_or(0);
+    let mut resp = resp;
+    let mut body: Vec<u8> = Vec::with_capacity(total as usize);
+    let mut last = 0;
+    while let Some(chunk) = resp.chunk().await? {
+        body.extend_from_slice(&chunk);
+        if body.len() as u64 - last >= 512 * 1024 {
+            last = body.len() as u64;
+            on_progress(last, total);
+        }
+    }
+    let text = String::from_utf8(body).context("manifeste illisible")?;
     let manifest = tauri::async_runtime::spawn_blocking(move || from_yaml(&text)).await??;
     let meta = ManifestMeta {
         etag,
         updated_at: Some(now),
         game_count: manifest.games.len(),
+        format: FORMAT,
     };
     files.save(&manifest, &meta)?;
     Ok(Some((manifest, meta)))

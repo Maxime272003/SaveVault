@@ -13,6 +13,7 @@ pub enum Store {
     Epic,
     Ubisoft,
     Gog,
+    Emulator,
     Other,
 }
 

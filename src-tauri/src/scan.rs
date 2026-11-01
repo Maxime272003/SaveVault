@@ -19,6 +19,8 @@ pub enum LocationKind {
     Dir,
     /// Seuls certains fichiers du dossier sont la save.
     Files,
+    /// Clé de registre HKCU (`path` = chemin de la clé).
+    Registry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +124,7 @@ pub fn run(manifest: &Manifest, config: &AppConfig) -> ScanResult {
     let mut covered: Vec<String> = covered_paths(&games);
     let mut unidentified = Vec::new();
     add_steam_userdata(&ctx, &mut games, &mut unidentified, &covered);
+    add_emulators(&ctx, &mut games);
     add_custom_entries(&ctx, manifest, config, &mut games);
     covered = covered_paths(&games);
 
@@ -194,7 +197,7 @@ fn store_tag(store: Store) -> &'static str {
         Store::Epic => "epic",
         Store::Ubisoft => "uplay",
         Store::Gog => "gog",
-        Store::Other => "other",
+        Store::Emulator | Store::Other => "other",
     }
 }
 
@@ -209,14 +212,119 @@ fn scan_manifest_game(ctx: &Ctx, index: &InstallIndex, g: &MGame) -> Option<Game
     if let Some(dirs) = g.steam_id.and_then(|id| ctx.steam_remote.get(&id)) {
         matched.extend(dirs.iter().cloned());
     }
-    if matched.is_empty() {
+    let registry: Vec<Location> = g.registry.iter().filter_map(|k| registry_location(k)).collect();
+    if matched.is_empty() && registry.is_empty() {
         return None;
     }
-    let locations = build_locations(ctx, matched);
+    let mut locations = if matched.is_empty() { Vec::new() } else { build_locations(ctx, matched) };
+    locations.extend(registry);
     if locations.is_empty() {
         return None;
     }
     Some(make_game(ctx, g.name.clone(), g.steam_id, g.cloud_steam, inst, locations))
+}
+
+fn registry_location(key: &str) -> Option<Location> {
+    let count = crate::registry::entry_count(key).filter(|&n| n > 0)?;
+    Some(Location {
+        path: key.to_string(),
+        kind: LocationKind::Registry,
+        files: Vec::new(),
+        size: 0,
+        file_count: count,
+        modified: None,
+        custom: false,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum EmuBase {
+    AppData,
+    Documents,
+    /// Sous-dossier d'un jeu « installé » (dossiers de jeux) dont le nom contient ce texte.
+    Install(&'static str),
+}
+
+/// Émulateurs connus et dossiers où ils rangent les saves de leurs jeux.
+const EMULATORS: &[(&str, &[(EmuBase, &str)])] = {
+    use EmuBase::*;
+    &[
+        ("Ryujinx (Switch)", &[(AppData, r"Ryujinx\bis\user\save"), (Install("ryujinx"), r"portable\bis\user\save")]),
+        ("yuzu (Switch)", &[(AppData, r"yuzu\nand\user\save"), (Install("yuzu"), r"user\nand\user\save")]),
+        ("suyu (Switch)", &[(AppData, r"suyu\nand\user\save")]),
+        ("Sudachi (Switch)", &[(AppData, r"sudachi\nand\user\save")]),
+        ("Citron (Switch)", &[(AppData, r"citron\nand\user\save")]),
+        ("Eden (Switch)", &[(AppData, r"eden\nand\user\save")]),
+        (
+            "Dolphin (GameCube / Wii)",
+            &[
+                (Documents, r"Dolphin Emulator\GC"),
+                (Documents, r"Dolphin Emulator\Wii\title"),
+                (AppData, r"Dolphin Emulator\GC"),
+                (AppData, r"Dolphin Emulator\Wii\title"),
+                (Install("dolphin"), r"User\GC"),
+                (Install("dolphin"), r"User\Wii\title"),
+            ],
+        ),
+        ("Cemu (Wii U)", &[(AppData, r"Cemu\mlc01\usr\save"), (Install("cemu"), r"mlc01\usr\save")]),
+        ("Citra (3DS)", &[(AppData, r"Citra\sdmc\Nintendo 3DS")]),
+        ("Lime3DS (3DS)", &[(AppData, r"Lime3DS\sdmc\Nintendo 3DS")]),
+        ("Azahar (3DS)", &[(AppData, r"Azahar\sdmc\Nintendo 3DS")]),
+        ("PCSX2 (PS2)", &[(Documents, r"PCSX2\memcards"), (Install("pcsx2"), "memcards")]),
+        ("DuckStation (PS1)", &[(Documents, r"DuckStation\memcards"), (Install("duckstation"), "memcards")]),
+        ("RPCS3 (PS3)", &[(Install("rpcs3"), r"dev_hdd0\home\00000001\savedata")]),
+        ("PPSSPP (PSP)", &[(Documents, r"PPSSPP\PSP\SAVEDATA"), (Install("ppsspp"), r"memstick\PSP\SAVEDATA")]),
+        ("Vita3K (PS Vita)", &[(AppData, r"Vita3K\Vita3K\ux0\user\00\savedata")]),
+        (
+            "RetroArch",
+            &[
+                (AppData, r"RetroArch\saves"),
+                (AppData, r"RetroArch\states"),
+                (Install("retroarch"), "saves"),
+                (Install("retroarch"), "states"),
+            ],
+        ),
+    ]
+};
+
+fn add_emulators(ctx: &Ctx, games: &mut Vec<Game>) {
+    for (name, places) in EMULATORS {
+        let mut install: Option<&InstalledGame> = None;
+        let mut locations: Vec<Location> = Vec::new();
+        for (base, rel) in places.iter() {
+            let roots: Vec<(PathBuf, Option<&InstalledGame>)> = match base {
+                EmuBase::AppData => ctx.dirs.app_data.iter().map(|p| (p.clone(), None)).collect(),
+                EmuBase::Documents => ctx.dirs.documents.iter().map(|p| (p.clone(), None)).collect(),
+                EmuBase::Install(needle) => ctx
+                    .stores
+                    .installed
+                    .iter()
+                    .filter(|g| {
+                        g.install_dir
+                            .file_name()
+                            .is_some_and(|n| n.to_string_lossy().to_lowercase().contains(needle))
+                    })
+                    .map(|g| (g.install_dir.clone(), Some(g)))
+                    .collect(),
+            };
+            for (root, inst) in roots {
+                let dir = root.join(rel);
+                if dir.is_dir() {
+                    let loc = dir_location(&dir, false);
+                    if loc.file_count > 0 {
+                        locations.push(loc);
+                        install = install.or(inst);
+                    }
+                }
+            }
+        }
+        if locations.is_empty() || games.iter().any(|g| g.id == *name) {
+            continue;
+        }
+        let mut game = make_game(ctx, name.to_string(), None, false, install, locations);
+        game.source = Store::Emulator;
+        games.push(game);
+    }
 }
 
 fn steam_remote_dirs(stores: &Stores) -> HashMap<u32, Vec<PathBuf>> {
