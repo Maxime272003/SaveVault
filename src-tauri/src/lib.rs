@@ -152,13 +152,13 @@ async fn ensure_manifest(state: &AppState) -> CmdResult<Arc<Manifest>> {
     Ok(m)
 }
 
-#[tauri::command]
-fn get_cached_scan(state: State<'_, AppState>) -> Option<ScanResult> {
+#[tauri::command(async)]
+fn get_cached_scan(state: State<'_, AppState>) -> CmdResult<Option<ScanResult>> {
     let mut guard = state.scan.lock().unwrap();
     if guard.is_none() {
         *guard = fs::read(state.scan_file()).ok().and_then(|b| serde_json::from_slice(&b).ok());
     }
-    guard.clone()
+    Ok(guard.clone())
 }
 
 #[tauri::command]
@@ -208,7 +208,7 @@ async fn restore_backup(state: State<'_, AppState>, path: String) -> CmdResult<(
         .map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_backup(state: State<'_, AppState>, path: String) -> CmdResult<()> {
     let dir = state.backup_dir()?;
     let inside = paths::is_within(&paths::norm(Path::new(&path)), &paths::norm(&dir));
@@ -292,14 +292,13 @@ async fn delete_unknown(state: State<'_, AppState>, path: String) -> CmdResult<(
     Ok(())
 }
 
-#[tauri::command]
-fn is_game_running(state: State<'_, AppState>, game_id: String) -> Option<bool> {
-    let game = state.game(&game_id).ok()?;
-    let dir = game.install_dir?;
-    Some(process::is_running_from(Path::new(&dir)))
+#[tauri::command(async)]
+fn is_game_running(state: State<'_, AppState>, game_id: String) -> CmdResult<Option<bool>> {
+    let Some(dir) = state.game(&game_id).ok().and_then(|g| g.install_dir) else { return Ok(None) };
+    Ok(Some(process::is_running_from(Path::new(&dir))))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_path(app: tauri::AppHandle, path: String) -> CmdResult<()> {
     let p = Path::new(&path);
     if p.is_file() {
@@ -309,37 +308,58 @@ fn open_path(app: tauri::AppHandle, path: String) -> CmdResult<()> {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CoverData {
+    /// Image encodée en `data:` URL, affichable directement par la webview.
+    src: String,
+    portrait: bool,
+}
+
 #[tauri::command]
-async fn get_cover(state: State<'_, AppState>, app_id: Option<u32>, title: String) -> CmdResult<Option<covers::Cover>> {
+async fn get_cover(state: State<'_, AppState>, app_id: Option<u32>, title: String) -> CmdResult<Option<CoverData>> {
+    use base64::Engine;
     let key = state.config().steamgriddb_key;
     let steam_root = stores::Stores::steam_root();
-    Ok(covers::get(&state.covers_dir(), steam_root.as_deref(), app_id, &title, &key).await)
+    let Some(cover) = covers::get(&state.covers_dir(), steam_root.as_deref(), app_id, &title, &key).await else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&cover.path);
+    let mime = match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        _ => "image/jpeg",
+    };
+    let bytes = tauri::async_runtime::spawn_blocking(move || fs::read(path)).await.map_err(err)?.map_err(err)?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(Some(CoverData { src: format!("data:{mime};base64,{encoded}"), portrait: cover.portrait }))
 }
 
-#[tauri::command]
-fn cover_cache_stats(state: State<'_, AppState>) -> covers::CacheStats {
-    covers::stats(&state.covers_dir())
+#[tauri::command(async)]
+fn cover_cache_stats(state: State<'_, AppState>) -> CmdResult<covers::CacheStats> {
+    Ok(covers::stats(&state.covers_dir()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_cover_cache(state: State<'_, AppState>) -> CmdResult<()> {
     covers::clear(&state.covers_dir()).map_err(err)
 }
 
-#[tauri::command]
-fn search_titles(state: State<'_, AppState>, query: String) -> Vec<TitleHit> {
+#[tauri::command(async)]
+fn search_titles(state: State<'_, AppState>, query: String) -> CmdResult<Vec<TitleHit>> {
     let q = query.trim().to_lowercase();
     if q.len() < 2 {
-        return vec![];
+        return Ok(vec![]);
     }
     let guard = state.manifest.read().unwrap();
-    let Some(m) = guard.as_ref() else { return vec![] };
+    let Some(m) = guard.as_ref() else { return Ok(vec![]) };
     let mut hits: Vec<&manifest::MGame> = m.games.iter().filter(|g| g.name.to_lowercase().contains(&q)).collect();
     hits.sort_by_key(|g| (!g.name.to_lowercase().starts_with(&q), g.name.len()));
-    hits.into_iter()
+    Ok(hits
+        .into_iter()
         .take(20)
         .map(|g| TitleHit { name: g.name.clone(), steam_id: g.steam_id })
-        .collect()
+        .collect())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

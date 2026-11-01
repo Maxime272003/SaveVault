@@ -70,6 +70,7 @@ export interface AppConfig {
   checkUpdatesOnStart: boolean;
   customEntries: CustomEntry[];
   ignoredPaths: string[];
+  gameDirs: string[];
 }
 
 export interface ManifestStatus {
@@ -79,7 +80,8 @@ export interface ManifestStatus {
 }
 
 export interface Cover {
-  path: string;
+  /** Image en data URL. */
+  src: string;
   portrait: boolean;
 }
 

@@ -1,4 +1,3 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "./api";
 
 export interface CoverImage {
@@ -27,7 +26,7 @@ export function loadCover(appId: number | null, title: string): Promise<CoverIma
       queue.push(async () => {
         try {
           const c = await api.getCover(appId, title);
-          resolve(c ? { src: convertFileSrc(c.path), portrait: c.portrait } : null);
+          resolve(c);
         } catch {
           resolve(null);
         } finally {
