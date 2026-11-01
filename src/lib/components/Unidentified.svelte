@@ -3,6 +3,7 @@
   import { formatSize, relativeTime } from "$lib/format";
   import { t } from "$lib/i18n.svelte";
   import { app } from "$lib/store.svelte";
+  import { SvelteSet } from "svelte/reactivity";
   import Dialog from "./Dialog.svelte";
   import Icon from "./Icon.svelte";
 
@@ -30,25 +31,44 @@
   }
 
   async function attach(u: UnknownDir, game: string) {
-    if (!app.config || !game.trim()) return;
-    await app.saveConfig({ customEntries: [...app.config.customEntries, { game: game.trim(), path: u.path }] });
+    if (!game.trim()) return;
+    await app.attach([{ game, path: u.path }]);
     app.toast(t("unknown.attached", { game: game.trim() }));
-    await app.rescan();
   }
 
   async function ignore(u: UnknownDir) {
-    if (!app.config) return;
-    await app.saveConfig({ ignoredPaths: [...app.config.ignoredPaths, u.path] });
-    if (app.scan) app.scan = { ...app.scan, unidentified: app.scan.unidentified.filter((x) => x.path !== u.path) };
+    await app.ignore([u.path]);
+    checked.delete(u.path);
     app.toast(t("unknown.ignored"));
   }
 
+  // Sélection pour les actions en lot ; sans sélection, elles portent sur toute la liste.
+  const checked = new SvelteSet<string>();
+  const scope = $derived(checked.size ? list.filter((u) => checked.has(u.path)) : list);
+  const suggested = $derived(scope.filter((u) => u.suggestion));
+  const allChecked = $derived(list.length > 0 && list.every((u) => checked.has(u.path)));
+
+  function toggleAll() {
+    if (allChecked) checked.clear();
+    else for (const u of list) checked.add(u.path);
+  }
+
+  async function attachSuggested() {
+    const entries = suggested.map((u) => ({ game: u.suggestion!, path: u.path }));
+    await app.attach(entries);
+    checked.clear();
+    app.toast(t("unknown.bulkAttached", { n: entries.length }));
+  }
+
+  async function ignoreScope() {
+    const paths = scope.map((u) => u.path);
+    await app.ignore(paths);
+    checked.clear();
+    app.toast(t("unknown.bulkIgnored", { n: paths.length }));
+  }
+
   async function backup(u: UnknownDir) {
-    if (!app.config?.backupDir) {
-      app.view = "settings";
-      app.toast(t("err.no_backup_dir"), "error");
-      return;
-    }
+    if (!app.requireBackupDir()) return;
     try {
       const info = await api.backupUnknown(u.path);
       app.toast(t("backup.created", { name: info.fileName }));
@@ -75,11 +95,32 @@
 
   {#if list.length === 0}
     <p class="muted">{t("unknown.empty")}</p>
+  {:else}
+    <div class="bulk">
+      <label class="check-all">
+        <input type="checkbox" checked={allChecked} indeterminate={checked.size > 0 && !allChecked} onchange={toggleAll} />
+        {t("unknown.selectAll")}
+      </label>
+      <div class="bulk-actions">
+        <button class="btn small primary" onclick={attachSuggested} disabled={suggested.length === 0}>
+          <Icon name="link" size={14} />
+          {t("unknown.attachSuggested", { n: suggested.length })}
+        </button>
+        <button class="btn small" onclick={ignoreScope}>{t("unknown.ignoreSelected", { n: scope.length })}</button>
+      </div>
+    </div>
   {/if}
 
   <ul>
     {#each list as u (u.path)}
-      <li>
+      <li class:on={checked.has(u.path)}>
+        <input
+          type="checkbox"
+          class="row-check"
+          aria-label={u.name}
+          checked={checked.has(u.path)}
+          onchange={() => (checked.has(u.path) ? checked.delete(u.path) : checked.add(u.path))}
+        />
         <div class="info">
           <span class="name">{u.name}</span>
           <code class="mono">{u.path}</code>
@@ -183,6 +224,44 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .bulk {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 10px 16px;
+    margin-bottom: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    position: sticky;
+    top: -32px;
+    z-index: 1;
+  }
+
+  .check-all {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .bulk-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  input[type="checkbox"] {
+    accent-color: var(--accent);
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+
+  li.on {
+    border-color: var(--accent-border);
   }
 
   li {
