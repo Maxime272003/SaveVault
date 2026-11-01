@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { loadCover, type CoverImage } from "$lib/covers";
+  import { loadCover, peekCover, type CoverImage } from "$lib/covers";
   import { titleColor } from "$lib/format";
 
   let {
@@ -12,19 +12,30 @@
   let el: HTMLDivElement;
   let image = $state<CoverImage | null>(null);
   let failed = $state(false);
+  /** Le titre de secours ne s'affiche qu'une fois sûr qu'il n'y a pas d'image. */
+  let settled = $state(false);
 
   $effect(() => {
     const id = appId;
     const name = title;
-    image = null;
     failed = false;
+    const known = peekCover(id, name);
+    if (known !== undefined) {
+      image = known;
+      settled = true;
+      return;
+    }
+    image = null;
+    settled = false;
     let cancelled = false;
     const io = new IntersectionObserver(
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return;
         io.disconnect();
         loadCover(id, name).then((c) => {
-          if (!cancelled) image = c;
+          if (cancelled) return;
+          image = c;
+          settled = true;
         });
       },
       { rootMargin: "300px" },
@@ -45,7 +56,7 @@
       style:object-position={image.portrait ? position : "center"}
       onerror={() => (failed = true)}
     />
-  {:else if showTitle}
+  {:else if showTitle && (settled || failed)}
     <span class="name">{title}</span>
   {/if}
 </div>
