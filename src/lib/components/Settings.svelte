@@ -84,6 +84,21 @@
     await app.rescan();
   }
 
+  async function addGameDir() {
+    if (!app.config) return;
+    const dir = await open({ directory: true });
+    if (typeof dir === "string" && !app.config.gameDirs.includes(dir)) {
+      await app.saveConfig({ gameDirs: [...app.config.gameDirs, dir] }, true);
+      await app.rescan();
+    }
+  }
+
+  async function removeGameDir(i: number) {
+    if (!app.config) return;
+    await app.saveConfig({ gameDirs: app.config.gameDirs.filter((_, j) => j !== i) });
+    await app.rescan();
+  }
+
   async function removeCustom(i: number) {
     if (!app.config) return;
     await app.saveConfig({ customEntries: app.config.customEntries.filter((_, j) => j !== i) });
@@ -205,6 +220,23 @@
           <button aria-pressed={app.config?.language === "en"} onclick={() => app.saveConfig({ language: "en" })}>English</button>
         </div>
       </div>
+      <div class="row">
+        <span>{t("settings.gameDirs")}</span>
+        <button class="btn" onclick={addGameDir}>{t("settings.addPath")}</button>
+      </div>
+      <span class="muted small">{t("settings.gameDirsHint")}</span>
+      {#if app.config?.gameDirs.length}
+        <ul class="custom">
+          {#each app.config.gameDirs as dir, i (dir)}
+            <li>
+              <code class="mono">{dir}</code>
+              <button class="btn small ghost" onclick={() => removeGameDir(i)}>{t("settings.remove")}</button>
+            </li>
+          {/each}
+        </ul>
+      {:else}
+        <span class="muted small">{t("settings.noGameDirs")}</span>
+      {/if}
       <div class="row">
         <span>{t("settings.customPaths")}</span>
         <button class="btn" onclick={addCustomPath}>{t("settings.addPath")}</button>

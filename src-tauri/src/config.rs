@@ -24,6 +24,8 @@ pub struct AppConfig {
     pub check_updates_on_start: bool,
     pub custom_entries: Vec<CustomEntry>,
     pub ignored_paths: Vec<String>,
+    /// Dossiers dont chaque sous-dossier est un jeu installé hors launcher (ex. `C:\Games`).
+    pub game_dirs: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -37,6 +39,7 @@ impl Default for AppConfig {
             check_updates_on_start: true,
             custom_entries: Vec::new(),
             ignored_paths: Vec::new(),
+            game_dirs: vec![r"C:\Games".to_string()],
         }
     }
 }

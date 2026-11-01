@@ -47,7 +47,7 @@ pub fn steam_id64_to_id32(id64: u64) -> Option<u32> {
 }
 
 impl Stores {
-    pub fn detect(program_data: Option<&Path>) -> Self {
+    pub fn detect(program_data: Option<&Path>, game_dirs: &[PathBuf]) -> Self {
         let mut stores = Stores::default();
         detect_steam(&mut stores);
         detect_ubisoft(&mut stores);
@@ -55,6 +55,8 @@ impl Stores {
         if let Some(pd) = program_data {
             detect_epic(&mut stores, pd);
         }
+        // En dernier : les launchers restent prioritaires pour un même jeu.
+        detect_game_dirs(&mut stores, game_dirs);
         stores
     }
 
@@ -249,4 +251,28 @@ fn detect_gog(stores: &mut Stores) {
     }
     #[cfg(not(windows))]
     let _ = stores;
+}
+
+/// Chaque sous-dossier d'un dossier de jeux (ex. `C:\Games\FINAL FANTASY VII REBIRTH`) est un jeu installé.
+fn detect_game_dirs(stores: &mut Stores, game_dirs: &[PathBuf]) {
+    for dir in game_dirs {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let key = crate::paths::norm(&path);
+            if stores.installed.iter().any(|g| crate::paths::norm(&g.install_dir) == key) {
+                continue;
+            }
+            stores.installed.push(InstalledGame {
+                store: Store::Other,
+                name: entry.file_name().to_string_lossy().to_string(),
+                install_dir: path,
+                steam_id: None,
+                gog_id: None,
+            });
+        }
+    }
 }
