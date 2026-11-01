@@ -26,6 +26,9 @@ pub struct AppConfig {
     pub ignored_paths: Vec<String>,
     /// Dossiers dont chaque sous-dossier est un jeu installé hors launcher (ex. `C:\Games`).
     pub game_dirs: Vec<String>,
+    /// `off`, `startup`, `daily` ou `weekly` : backup automatique des jeux modifiés à l'ouverture de l'app.
+    pub auto_backup: String,
+    pub last_auto_backup: Option<i64>,
 }
 
 impl Default for AppConfig {
@@ -40,6 +43,8 @@ impl Default for AppConfig {
             custom_entries: Vec::new(),
             ignored_paths: Vec::new(),
             game_dirs: vec![r"C:\Games".to_string()],
+            auto_backup: "off".into(),
+            last_auto_backup: None,
         }
     }
 }

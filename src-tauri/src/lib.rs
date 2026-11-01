@@ -4,6 +4,7 @@ mod covers;
 mod manifest;
 mod paths;
 mod process;
+mod registry;
 mod scan;
 mod stores;
 mod vdf;
@@ -16,13 +17,67 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 type CmdResult<T> = Result<T, String>;
 
+/// Message d'erreur pour l'interface, aussi écrit dans le journal.
 fn err(e: impl std::fmt::Display) -> String {
-    format!("{e:#}")
+    let msg = format!("{e:#}");
+    log::error!("{msg}");
+    msg
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProgressEvent {
+    task: &'static str,
+    label: String,
+    done: u64,
+    total: u64,
+    finished: bool,
+}
+
+/// Envoie la progression d'une tâche longue à l'interface (événement `progress`),
+/// au plus une fois par pourcent.
+struct Reporter {
+    app: AppHandle,
+    task: &'static str,
+    label: Mutex<String>,
+    last: Mutex<i64>,
+}
+
+impl Reporter {
+    fn new(app: &AppHandle, task: &'static str, label: impl Into<String>) -> Self {
+        Self { app: app.clone(), task, label: Mutex::new(label.into()), last: Mutex::new(-1) }
+    }
+
+    fn set_label(&self, label: impl Into<String>) {
+        *self.label.lock().unwrap() = label.into();
+        *self.last.lock().unwrap() = -1;
+    }
+
+    fn update(&self, done: u64, total: u64) {
+        let pct = if total == 0 { 0 } else { (done * 100 / total) as i64 };
+        let mut last = self.last.lock().unwrap();
+        if pct == *last {
+            return;
+        }
+        *last = pct;
+        self.send(done, total, false);
+    }
+
+    fn send(&self, done: u64, total: u64, finished: bool) {
+        let label = self.label.lock().unwrap().clone();
+        let _ = self.app.emit("progress", ProgressEvent { task: self.task, label, done, total, finished });
+    }
+}
+
+impl Drop for Reporter {
+    fn drop(&mut self) {
+        self.send(0, 0, true);
+    }
 }
 
 struct AppState {
@@ -125,15 +180,21 @@ fn get_manifest_status(state: State<'_, AppState>) -> ManifestStatus {
     manifest_status(&state)
 }
 
+async fn download_manifest(app: &AppHandle, state: &AppState, force: bool) -> CmdResult<Option<Manifest>> {
+    let reporter = Reporter::new(app, "manifest", "Ludusavi");
+    let result = manifest::download(&state.manifest_files, force, &|done, total| reporter.update(done, total)).await;
+    Ok(result.map_err(err)?.map(|(m, _)| m))
+}
+
 #[tauri::command]
-async fn update_manifest(state: State<'_, AppState>, force: bool) -> CmdResult<ManifestStatus> {
-    if let Some((m, _)) = manifest::download(&state.manifest_files, force).await.map_err(err)? {
+async fn update_manifest(app: AppHandle, state: State<'_, AppState>, force: bool) -> CmdResult<ManifestStatus> {
+    if let Some(m) = download_manifest(&app, &state, force).await? {
         *state.manifest.write().unwrap() = Some(Arc::new(m));
     }
     Ok(manifest_status(&state))
 }
 
-async fn ensure_manifest(state: &AppState) -> CmdResult<Arc<Manifest>> {
+async fn ensure_manifest(app: &AppHandle, state: &AppState) -> CmdResult<Arc<Manifest>> {
     if let Some(m) = state.manifest.read().unwrap().clone() {
         return Ok(m);
     }
@@ -141,10 +202,8 @@ async fn ensure_manifest(state: &AppState) -> CmdResult<Arc<Manifest>> {
     let loaded = tauri::async_runtime::spawn_blocking(move || files.load()).await.map_err(err)?;
     let m = match loaded {
         Some(m) => m,
-        None => manifest::download(&state.manifest_files, true)
-            .await
-            .map_err(err)?
-            .map(|(m, _)| m)
+        None => download_manifest(app, state, true)
+            .await?
             .ok_or_else(|| "manifest_unavailable".to_string())?,
     };
     let m = Arc::new(m);
@@ -162,32 +221,167 @@ fn get_cached_scan(state: State<'_, AppState>) -> CmdResult<Option<ScanResult>> 
 }
 
 #[tauri::command]
-async fn run_scan(state: State<'_, AppState>) -> CmdResult<ScanResult> {
-    let manifest = ensure_manifest(&state).await?;
+async fn run_scan(app: AppHandle, state: State<'_, AppState>) -> CmdResult<ScanResult> {
+    let manifest = ensure_manifest(&app, &state).await?;
     let config = state.config();
+    let started = std::time::Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || scan::run(&manifest, &config))
         .await
         .map_err(err)?;
+    log::info!(
+        "scan : {} jeux, {} dossiers inconnus en {:?}",
+        result.games.len(),
+        result.unidentified.len(),
+        started.elapsed()
+    );
     state.store_scan(result.clone());
     Ok(result)
 }
 
+fn backup_game(dir: &Path, config: &AppConfig, game: &scan::Game, kind: BackupKind, reporter: &Reporter) -> anyhow::Result<BackupInfo> {
+    let locs: Vec<MetaLocation> = game.locations.iter().map(MetaLocation::from).collect();
+    let info = backup::create(dir, &game.title, &locs, kind, &|done, total| reporter.update(done, total))?;
+    if config.retention_enabled {
+        backup::apply_retention(dir, &game.title, config.retention_count)?;
+    }
+    log::info!("backup créé : {}", info.path);
+    Ok(info)
+}
+
 #[tauri::command]
-async fn create_backup(state: State<'_, AppState>, game_id: String) -> CmdResult<BackupInfo> {
+async fn create_backup(app: AppHandle, state: State<'_, AppState>, game_id: String) -> CmdResult<BackupInfo> {
     let game = state.game(&game_id)?;
     let dir = state.backup_dir()?;
     let config = state.config();
     tauri::async_runtime::spawn_blocking(move || {
-        let locs: Vec<MetaLocation> = game.locations.iter().map(MetaLocation::from).collect();
-        let info = backup::create(&dir, &game.title, &locs, BackupKind::Manual)?;
-        if config.retention_enabled {
-            backup::apply_retention(&dir, &game.title, config.retention_count)?;
-        }
-        anyhow::Ok(info)
+        let reporter = Reporter::new(&app, "backup", game.title.clone());
+        backup_game(&dir, &config, &game, BackupKind::Manual, &reporter)
     })
     .await
     .map_err(err)?
     .map_err(err)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchError {
+    game: String,
+    error: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchReport {
+    created: usize,
+    skipped: usize,
+    failed: Vec<BatchError>,
+}
+
+/// Backup de plusieurs jeux à la suite. `only_changed` saute les jeux dont aucune save
+/// n'a été modifiée depuis leur dernier backup.
+#[tauri::command]
+async fn backup_games(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    game_ids: Vec<String>,
+    only_changed: bool,
+    auto: bool,
+) -> CmdResult<BatchReport> {
+    let dir = state.backup_dir()?;
+    let config = state.config();
+    let games: Vec<scan::Game> = game_ids.iter().filter_map(|id| state.game(id).ok()).collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        let latest: std::collections::HashMap<String, i64> =
+            backup::list(&dir).into_iter().fold(Default::default(), |mut m, b| {
+                let e = m.entry(b.game).or_insert(0);
+                *e = (*e).max(b.created_at);
+                m
+            });
+        let reporter = Reporter::new(&app, "batch", "");
+        let mut report = BatchReport { created: 0, skipped: 0, failed: Vec::new() };
+        let total = games.len();
+        for (i, game) in games.iter().enumerate() {
+            let unchanged = latest.get(&game.title).is_some_and(|&t| t >= game.modified.unwrap_or(0));
+            if only_changed && unchanged {
+                report.skipped += 1;
+                continue;
+            }
+            reporter.set_label(format!("{} ({}/{total})", game.title, i + 1));
+            let kind = if auto { BackupKind::Auto } else { BackupKind::Manual };
+            match backup_game(&dir, &config, game, kind, &reporter) {
+                Ok(_) => report.created += 1,
+                Err(e) => report.failed.push(BatchError { game: game.title.clone(), error: err(e) }),
+            }
+        }
+        report
+    })
+    .await
+    .map_err(err)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileEntry {
+    path: String,
+    size: u64,
+    modified: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileList {
+    files: Vec<FileEntry>,
+    truncated: bool,
+}
+
+/// Fichiers d'un emplacement (chemins relatifs), pour les voir avant d'agir. Lecture seule.
+#[tauri::command(async)]
+fn list_location_files(path: String, files: Vec<String>) -> CmdResult<FileList> {
+    const MAX: usize = 1000;
+    let root = PathBuf::from(&path);
+    let modified = |m: &fs::Metadata| {
+        m.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+    };
+    let mut out = Vec::new();
+    let mut truncated = false;
+    if files.is_empty() {
+        for e in walkdir::WalkDir::new(&root).follow_links(false).into_iter().flatten() {
+            if !e.file_type().is_file() {
+                continue;
+            }
+            if out.len() >= MAX {
+                truncated = true;
+                break;
+            }
+            let Ok(meta) = e.metadata() else { continue };
+            let rel = e.path().strip_prefix(&root).unwrap_or(e.path()).to_string_lossy().to_string();
+            out.push(FileEntry { path: rel, size: meta.len(), modified: modified(&meta) });
+        }
+    } else {
+        for name in files.iter().take(MAX) {
+            if let Ok(meta) = fs::metadata(root.join(name)) {
+                out.push(FileEntry { path: name.clone(), size: meta.len(), modified: modified(&meta) });
+            }
+        }
+        truncated = files.len() > MAX;
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(FileList { files: out, truncated })
+}
+
+#[tauri::command(async)]
+fn is_steam_running() -> CmdResult<bool> {
+    Ok(process::is_named_running("steam.exe"))
+}
+
+#[tauri::command(async)]
+fn open_log_dir(app: AppHandle) -> CmdResult<()> {
+    let dir = app.path().app_log_dir().map_err(err)?;
+    fs::create_dir_all(&dir).map_err(err)?;
+    app.opener().open_path(dir.to_string_lossy(), None::<&str>).map_err(err)
 }
 
 #[tauri::command]
@@ -197,15 +391,21 @@ async fn list_backups(state: State<'_, AppState>) -> CmdResult<Vec<BackupInfo>> 
 }
 
 #[tauri::command]
-async fn restore_backup(state: State<'_, AppState>, path: String) -> CmdResult<()> {
+async fn restore_backup(app: AppHandle, state: State<'_, AppState>, path: String) -> CmdResult<()> {
     let dir = state.backup_dir()?;
     let zip = PathBuf::from(&path);
     let meta = backup::read_meta(&zip).map_err(err)?;
     state.ensure_not_running(&meta.game)?;
-    tauri::async_runtime::spawn_blocking(move || backup::restore(&dir, &zip))
-        .await
-        .map_err(err)?
-        .map_err(err)
+    tauri::async_runtime::spawn_blocking(move || {
+        let reporter = Reporter::new(&app, "restore", meta.game.clone());
+        reporter.send(0, 0, false);
+        backup::restore(&dir, &zip)?;
+        log::info!("backup restauré : {}", zip.display());
+        anyhow::Ok(())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
 }
 
 #[tauri::command(async)]
@@ -226,7 +426,7 @@ async fn delete_game_saves(state: State<'_, AppState>, game_id: String) -> CmdRe
     let locs: Vec<MetaLocation> = game.locations.iter().map(MetaLocation::from).collect();
     tauri::async_runtime::spawn_blocking(move || {
         if backup::has_files(&locs) {
-            backup::create(&dir, &game.title, &locs, BackupKind::PreDelete)?;
+            backup::create(&dir, &game.title, &locs, BackupKind::PreDelete, &|_, _| {})?;
         }
         backup::trash_locations(&locs)
     })
@@ -262,7 +462,7 @@ fn unknown_locations(u: &scan::UnknownDir) -> Vec<MetaLocation> {
 async fn backup_unknown(state: State<'_, AppState>, path: String) -> CmdResult<BackupInfo> {
     let u = unknown_dir(&state, &path)?;
     let dir = state.backup_dir()?;
-    tauri::async_runtime::spawn_blocking(move || backup::create(&dir, &u.name, &unknown_locations(&u), BackupKind::Manual))
+    tauri::async_runtime::spawn_blocking(move || backup::create(&dir, &u.name, &unknown_locations(&u), BackupKind::Manual, &|_, _| {}))
         .await
         .map_err(err)?
         .map_err(err)
@@ -275,7 +475,7 @@ async fn delete_unknown(state: State<'_, AppState>, path: String) -> CmdResult<(
     tauri::async_runtime::spawn_blocking(move || {
         let locs = unknown_locations(&u);
         if backup::has_files(&locs) {
-            backup::create(&dir, &u.name, &locs, BackupKind::PreDelete)?;
+            backup::create(&dir, &u.name, &locs, BackupKind::PreDelete, &|_, _| {})?;
         }
         backup::trash_locations(&locs)
     })
@@ -324,13 +524,19 @@ async fn get_cover(state: State<'_, AppState>, app_id: Option<u32>, title: Strin
     let Some(cover) = covers::get(&state.covers_dir(), steam_root.as_deref(), app_id, &title, &key).await else {
         return Ok(None);
     };
-    let path = PathBuf::from(&cover.path);
+    let original = PathBuf::from(&cover.path);
+    let (path, bytes) = tauri::async_runtime::spawn_blocking(move || {
+        let path = covers::thumbnail(&original);
+        fs::read(&path).map(|b| (path, b))
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
     let mime = match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
         Some("png") => "image/png",
         Some("webp") => "image/webp",
         _ => "image/jpeg",
     };
-    let bytes = tauri::async_runtime::spawn_blocking(move || fs::read(path)).await.map_err(err)?.map_err(err)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(Some(CoverData { src: format!("data:{mime};base64,{encoded}"), portrait: cover.portrait }))
 }
@@ -364,7 +570,19 @@ fn search_titles(state: State<'_, AppState>, query: String) -> CmdResult<Vec<Tit
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::LogDir { file_name: Some("savevault".into()) }),
+                ])
+                .level(log::LevelFilter::Info)
+                .max_file_size(2_000_000)
+                .rotation_strategy(RotationStrategy::KeepOne)
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -394,6 +612,10 @@ pub fn run() {
             get_cached_scan,
             run_scan,
             create_backup,
+            backup_games,
+            list_location_files,
+            is_steam_running,
+            open_log_dir,
             list_backups,
             restore_backup,
             delete_backup,
